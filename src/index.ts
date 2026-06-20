@@ -814,8 +814,12 @@ joplin.plugins.register({
         collapsedFolders = {};
         await refreshPanel();
       } else if (msg.name === 'newNotebook') {
-        await joplin.commands.execute('newFolder');
+        const folderName = await showNativeInput(t.promptNewNotebookName, '');
+        if (!folderName || !folderName.trim()) return;
+        const newFolder = await joplin.data.post(['folders'], null, { title: folderName.trim() });
+        delete collapsedFolders[newFolder.id];
         await refreshPanel();
+        await joplin.views.panels.postMessage(panel, { name: 'scrollToFolder', folderId: newFolder.id });
       } else if (msg.name === 'newNote') {
         await joplin.commands.execute('newNote');
         const nn = await joplin.workspace.selectedNote();
@@ -1064,7 +1068,9 @@ joplin.plugins.register({
               case 'newSubNotebook': {
                 const subName = await showNativeInput(t.newNotebook, '');
                 if (subName && subName.trim()) {
-                  await joplin.data.post(['folders'], null, { title: subName.trim(), parent_id: id });
+                  const newFolder = await joplin.data.post(['folders'], null, { title: subName.trim(), parent_id: id });
+                  delete collapsedFolders[id];
+                  delete collapsedFolders[newFolder.id];
                 }
                 break;
               }
