@@ -373,6 +373,11 @@ function getFolderIcon(node: TreeNode, isCollapsed = true, openIcon: IconRenderD
   return isCollapsed ? closedIcon : openIcon;
 }
 
+function getNoteIcon(note: { is_todo?: number, todo_completed?: number }): string {
+  if (note.is_todo) return note.todo_completed ? '\u2611' : '\u2610';
+  return '\uD83D\uDCDD';
+}
+
 function renderTreeHtml(nodes: TreeNode[], selectedNoteId: string, collapsedSet: { [id: string]: boolean }, level = 0, showFolderToggles = true, openFolderIcon: IconRenderData = { type: 'text', value: '\uD83D\uDCC2' }, closedFolderIcon: IconRenderData = { type: 'text', value: '\uD83D\uDCC1' }): string {
   let html = '';
   for (const node of nodes) {
@@ -395,10 +400,7 @@ function renderTreeHtml(nodes: TreeNode[], selectedNoteId: string, collapsedSet:
       html += '</div>';
     } else {
       const selected = node.id === selectedNoteId ? ' selected' : '';
-      let icon = '\uD83D\uDCDD';
-      if (node.is_todo) {
-        icon = node.todo_completed ? '\u2611' : '\u2610';
-      }
+      const icon = getNoteIcon(node);
       html += '<div class="tree-item note' + selected + '" style="padding-left:' + indent + 'px" data-id="' + node.id + '" data-type="note">';
       html += '<span class="icon note-icon">' + icon + '</span>';
       html += '<span class="label">' + escapeHtml(node.title) + '</span>';
@@ -549,6 +551,29 @@ joplin.plugins.register({
     let pinnedCollapsed = false;
     let isFirstLoad = true;
     const pluginDataDir = await joplin.plugins.dataDir();
+    let refreshTimer: any = null;
+
+    function scheduleRefreshPanel(delay = 600): void {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(async () => {
+        refreshTimer = null;
+        await refreshPanel();
+      }, delay);
+    }
+
+    let noteChangeTimer: any = null;
+    let pendingNoteChangeIds: { [id: string]: boolean } = {};
+
+    function scheduleNoteUpdate(noteId: string): void {
+      pendingNoteChangeIds[noteId] = true;
+      if (noteChangeTimer) clearTimeout(noteChangeTimer);
+      noteChangeTimer = setTimeout(async () => {
+        noteChangeTimer = null;
+        const ids = Object.keys(pendingNoteChangeIds);
+        pendingNoteChangeIds = {};
+        for (const id of ids) await updateNoteInPanel(id);
+      }, 600);
+    }
 
     async function loadPinned(): Promise<void> {
       try {
@@ -680,8 +705,7 @@ joplin.plugins.register({
               for (const n of allNotes) { if (n.id === p.id) { note = n; break; } }
               if (note) {
                 const selected = note.id === selectedNoteId ? ' selected' : '';
-                let icon = '\uD83D\uDCDD';
-                if (note.is_todo) { icon = note.todo_completed ? '\u2611' : '\u2610'; }
+                const icon = getNoteIcon(note);
                 pinnedHtml += '<div class="tree-item note pinned-item' + selected + '" data-id="' + note.id + '" data-type="note">';
                 pinnedHtml += '<span class="icon note-icon">' + icon + '</span>';
                 pinnedHtml += '<span class="label">' + escapeHtml(note.title) + '</span>';
@@ -724,6 +748,39 @@ joplin.plugins.register({
       } catch (err) {
         console.error('Notes In List: refresh error', err);
         await joplin.views.panels.setHtml(panel, '<div style="padding:12px;color:red;">Error: ' + escapeHtml(String(err)) + '</div>');
+      }
+    }
+
+    async function updateNoteInPanel(noteId: string): Promise<void> {
+      try {
+        const cachedIndex = allNotesCache.findIndex((note) => note.id === noteId);
+        const note = await joplin.data.get(['notes', noteId], {
+          fields: ['id', 'title', 'parent_id', 'is_todo', 'todo_completed', 'updated_time', 'user_updated_time'],
+        });
+
+        if (cachedIndex < 0 || allNotesCache[cachedIndex].parent_id !== note.parent_id) {
+          await refreshPanel();
+          return;
+        }
+
+        const oldNote = allNotesCache[cachedIndex];
+        const titleSortChanged = currentSort.indexOf('title_') === 0 && (oldNote.title || '') !== (note.title || '');
+        const updatedSortChanged = currentSort.indexOf('updated_') === 0 && oldNote.user_updated_time !== note.user_updated_time;
+        allNotesCache[cachedIndex] = note;
+
+        if (titleSortChanged || updatedSortChanged) {
+          await refreshPanel();
+          return;
+        }
+
+        await joplin.views.panels.postMessage(panel, {
+          name: 'updateNote',
+          id: note.id,
+          title: note.title || '(untitled)',
+          icon: getNoteIcon(note),
+        });
+      } catch (_) {
+        await refreshPanel();
       }
     }
 
@@ -1212,6 +1269,11 @@ joplin.plugins.register({
         selectedNoteId = note.id;
         await joplin.views.panels.postMessage(panel, { name: 'selectNote', id: note.id });
       }
+    });
+
+    await joplin.workspace.onNoteChange(async (event: any) => {
+      if (event && event.id) scheduleNoteUpdate(event.id);
+      else scheduleRefreshPanel();
     });
 
     await refreshPanel();
